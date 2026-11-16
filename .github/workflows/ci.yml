@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+
+  api-tests:
+    needs: static
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: sdet_store
+          POSTGRES_USER: sdet
+          POSTGRES_PASSWORD: sdet_password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U sdet -d sdet_store"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      NODE_ENV: test
+      PORT: 3000
+      DATABASE_URL: postgres://sdet:sdet_password@localhost:5432/sdet_store
+      JWT_SECRET: ci-only-secret-not-for-production-use-32chars
+      AUTH_RATE_LIMIT_MAX: 100
+      API_BASE_URL: http://127.0.0.1:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run db:migrate
+      - run: npm run db:seed
+      - name: Start API
+        run: npm start > api.log 2>&1 &
+      - run: npx wait-on http://127.0.0.1:3000/health --timeout 60000
+      - run: npm test
+      - name: Upload reports and API log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics
+          path: |
+            playwright-report/
+            test-results/
+            api.log
+          retention-days: 14
